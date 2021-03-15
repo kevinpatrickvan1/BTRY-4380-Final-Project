@@ -1,0 +1,232 @@
+---
+title: "BTRY4830Project-kpv23"
+author: "Kevin Van Vorst"
+date: "May 10, 2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(HardyWeinberg)
+library(MASS)
+library(ggfortify)
+library(ggplot2)
+```
+
+```{r}
+#Import and save datasets
+genotype <- read.csv("genotypes.csv", header = TRUE, row.names = 1)
+phenotype <- read.csv("phenotypes.csv", header = TRUE, row.names = 1, col.names = c('ID', 'ERAP2', 'PEX6', 'FAHD1', 'GFM1', 'MARCH7'))
+covar <- read.csv("covars.csv", header = TRUE, row.names = 1, col.names = c("ID","Population", "Sex"))
+geneinfo <- read.csv("gene_info.csv", header = TRUE, col.names = c("Probe", "Chromosome", "Start", "End", "Symbol"))
+snpinfo <- read.csv("SNP_info.csv", header = TRUE, col.names = c("Chromosome", "Position", "ID"))
+
+#Figure out if there is any missing information in the genotype, phenotype, or covariate datasets
+missinginfo_gene <- genotype[genotype == ""] + genotype[genotype == "NA"]
+missinginfo_pheno <- phenotype[phenotype == ""] + phenotype[phenotype == "NA"]
+missinginfo_covar <- covar[covar == ""]
+missing_snp <- snpinfo[snpinfo == ""]
+```
+
+```{r}
+#minor allele frequency filter that removes genotypes containing MAF
+#Error in -drop : invalid argument to unary operator
+#instead "negate" the logic of filter and it gets the job done yielding same result
+MAF_filter <- function(genodata,threshold) {
+  keep = c()
+  for (i in 1:ncol(genodata)){
+    geno_count <- sum(genotype[,i])
+    minor_allele_freq <- geno_count/(2*nrow(genodata))
+  if(minor_allele_freq > threshold){
+    keep = append(keep, i)
+  }
+  }
+  return(genodata[,keep])
+}
+genotype <- MAF_filter(genodata = genotype,threshold = 0.05)
+cat("Number of genotypes remaining in dataset:", length(genotype))
+#No genotypes we're dropped
+#can now create xa and xd matricies
+xa_mat <- genotype - 1
+xd_mat <- (2*abs(xa_mat)) - 1
+
+#covariates
+#sex
+xz_sex <- ifelse(covar[,2] == "MALE", -1,  1)
+#population
+xz_pop <- ifelse(covar[,1]== "CEU", -1, ifelse(covar[,1]== "FIN", 0, ifelse(covar[,1]== "GBR", 1, 2)))
+xz_sex <- as.matrix(xz_sex)
+xz_pop <- as.matrix(xz_pop)
+```
+
+```{r}
+#create the histograms of the phenotype expression of each gene to determine if it follows
+#a normal distribution or any outliers exist
+erap2_pheno <- as.matrix(phenotype[,1])
+pex6_pheno <- as.matrix(phenotype[,2])
+fahd1_pheno <- as.matrix(phenotype[,3])
+gfm1_pheno <- as.matrix(phenotype[,4])
+march7_pheno <- as.matrix(phenotype[,5])
+
+hist1 <- hist(erap2_pheno, breaks = 50, main = "Histogram of ERAP2 Phenotype")
+hist2 <- hist(pex6_pheno, breaks = 50, main = "Histogram of PEX6 Phenotype")
+hist3 <- hist(fahd1_pheno, breaks = 50, main = "Histogram of FAHD1 Phenotype")
+hist4 <- hist(gfm1_pheno, breaks = 50, main = "Histogram of GFM1 Phenotype")
+hist5 <- hist(march7_pheno, breaks = 50, main = "Histogram of MARCH7 Phenotype")
+
+```
+
+```{r}
+#linear regression model that then calculates a pval for each genotype
+pval_calculator_covar <- function(pheno_input, xa_input, xd_input, xz_input){
+    x_h0 = cbind(rep(1,length(xa_input)), xz_input)
+    MLE_h0 = ginv(t(x_h0) %*% x_h0) %*% t(x_h0) %*% pheno_input
+    
+    x_h1 = cbind(rep(1,length(xa_input)), xa_input, xd_input, xz_input)
+    MLE_h1 = ginv(t(x_h1) %*% x_h1) %*% t(x_h1) %*% pheno_input
+    
+    yhat_0 = x_h0 %*% MLE_h0
+    yhat_1 = x_h1 %*% MLE_h1
+    
+    SSE_theta_0 = sum((pheno_input-yhat_0)^2)
+    SSE_theta_1 = sum((pheno_input-yhat_1)^2)
+    
+    n_samples <- length(xa_input)
+    df_M = ncol(x_h1) - ncol(x_h0)
+    df_E = n_samples - ncol(x_h1)
+    MSM <- (SSE_theta_0-SSE_theta_1)/df_M
+    MSE <- SSE_theta_1/df_E
+    fstat <- MSM/MSE
+    pval <- pf(fstat, df_M, df_E,lower.tail = FALSE)
+    return(pval)
+}
+#control group of pvalues to plot observed pvalues against in QQ-Plot
+expected_pval <- sort(-log10(runif(length(snpinfo[,1]))),decreasing=FALSE)
+
+#ERAP2
+ERAP2_pval_mx <- rep(0,ncol(xa_mat))
+for(i in 1:ncol(xa_mat)){
+  ERAP2_pval_mx[i] <- pval_calculator_covar(phenotype[,1], xa_mat[,i], xd_mat[,i], cbind(xz_sex[,1],xz_pop[,1]))
+}
+#Extract information of most significant SNP for further research
+ERAP2_mostsigsnp <- which.max(-log10(ERAP2_pval_mx))
+ERAP2_gene <- colnames(genotype[ERAP2_mostsigsnp])
+ERAP2_info <- snpinfo[snpinfo[,3] == ERAP2_gene,]
+
+#ERAP2 Manhattan Plot with Bonferroni Corrected Cutoff
+df1 <- data.frame(index = 1:length(ERAP2_pval_mx), pval = ERAP2_pval_mx) 
+manhattan1 <- ggplot(df1, aes(index, -log10(ERAP2_pval_mx))) + geom_point()
+manhattan1 = manhattan1 + geom_hline(yintercept = -log10(.05/50000), color = "red")
+manhattan1 = manhattan1 + ggtitle("Bonferroni Corrected Manhattan Plot for ERAP2")
+manhattan1 = manhattan1 + xlab("Index") + ylab("-log10(p-value)")
+manhattan1
+ggsave("ERAP2Manhattan.png")
+
+#ERAP2 QQPlot
+qqDf1 <- data.frame(ps=sort(-log10(ERAP2_pval_mx)), normalQuantiles=expected_pval)
+p1 = ggplot(qqDf1) + geom_point(aes(normalQuantiles, ps)) + ggtitle("ERAP2 p-values vs Expected p-values")
+p1 = p1 + geom_abline(intercept = 0, slope = 1, color="red")
+p1
+ggsave("ERAP2QQ.png")
+
+#PEX6
+PEX6_pval_mx <- rep(0,ncol(xa_mat))
+for(i in 1:ncol(xa_mat)){
+  PEX6_pval_mx[i] <- pval_calculator_covar(phenotype[,2], xa_mat[,i], xd_mat[,i], cbind(xz_sex[,1],xz_pop[,1]))
+}
+
+#Extract information of most significant SNP for further research
+PEX6_mostsigsnp <- which.max(-log10(PEX6_pval_mx))
+PEX6_gene <- colnames(genotype[PEX6_mostsigsnp])
+PEX6_info <- snpinfo[snpinfo[,3] == PEX6_gene,]
+
+#PEX6 Manhattan Plot with Bonferroni Corrected Cutoff
+df2 <- data.frame(index = 1:length(PEX6_pval_mx), pval = PEX6_pval_mx) 
+manhattan2 <- ggplot(df2, aes(index, -log10(PEX6_pval_mx))) + geom_point()
+manhattan2 = manhattan2 + geom_hline(yintercept = -log10(.05/50000), color = "red")
+manhattan2 = manhattan2 + ggtitle("Bonferroni Corrected Manhattan Plot for PEX6")
+manhattan2 = manhattan2 + xlab("Index") + ylab("-log10(p-value)")
+manhattan2
+ggsave("PEX6Manhattan.png")
+
+#Pex6 QQPlot
+qqDf2 <- data.frame(ps=sort(-log10(PEX6_pval_mx)), normalQuantiles=expected_pval)
+p2 = ggplot(qqDf2) + geom_point(aes(normalQuantiles, ps)) + ggtitle("PEX6 p-values vs Expected p-values")
+p2 = p2 + geom_abline(intercept = 0, slope = 1, color="red")
+p2
+ggsave("PEX6QQ.png")
+
+#FAHD1
+FAHD1_pval_mx <- rep(0,ncol(xa_mat))
+for(i in 1:ncol(xa_mat)){
+  FAHD1_pval_mx[i] <- pval_calculator_covar(phenotype[,3], xa_mat[,i], xd_mat[,i], cbind(xz_sex[,1],xz_pop[,1]))
+}
+
+#Extract information of most significant SNP for further research
+FAHD1_mostsigsnp <- which.max(-log10(FAHD1_pval_mx))
+FAHD1_gene <- colnames(genotype[FAHD1_mostsigsnp])
+FAHD1_info <- snpinfo[snpinfo[,3] == FAHD1_gene,]
+
+#FAHD1 Manhattan Plot with Bonferroni Corrected Cutoff
+df3 <- data.frame(index = 1:length(FAHD1_pval_mx), pval = FAHD1_pval_mx) 
+manhattan3 <- ggplot(df3, aes(index, -log10(FAHD1_pval_mx))) + geom_point()
+manhattan3 = manhattan3 + geom_hline(yintercept = -log10(.05/50000), color = "red")
+manhattan3 = manhattan3 + ggtitle("Bonferroni Corrected Manhattan Plot for FAHD1")
+manhattan3 = manhattan3 + xlab("Index") + ylab("-log10(p-value)")
+manhattan3
+ggsave("FAHD1Manhattan.png")
+
+#FAHD1 QQPlot
+qqDf3 <- data.frame(ps=sort(-log10(FAHD1_pval_mx)), normalQuantiles=expected_pval)
+p3 = ggplot(qqDf3) + geom_point(aes(normalQuantiles, ps)) + ggtitle("FAHD1 p-values vs Expected p-values")
+p3 = p3 + geom_abline(intercept = 0, slope = 1, color="red")
+p3
+ggsave("FAHD1QQ.png")
+
+#GFM1
+GFM1_pval_mx <- rep(0,ncol(xa_mat))
+for(i in 1:ncol(xa_mat)){
+  GFM1_pval_mx[i] <- pval_calculator_covar(phenotype[,4], xa_mat[,i], xd_mat[,i], cbind(xz_sex[,1],xz_pop[,1]))
+}
+
+#GFM1 Manhattan Plot with Bonferroni Corrected Cutoff
+df4 <- data.frame(index = 1:length(GFM1_pval_mx), pval = GFM1_pval_mx) 
+manhattan4 <- ggplot(df4, aes(index, -log10(GFM1_pval_mx))) + geom_point()
+manhattan4 = manhattan4 + geom_hline(yintercept = -log10(.05/50000), color = "red")
+manhattan4 = manhattan4 + ggtitle("Bonferroni Corrected Manhattan Plot for GFM1")
+manhattan4 = manhattan4 + xlab("Index") + ylab("-log10(p-value)")
+manhattan4
+ggsave("GFM1Manhattan.png")
+
+#GFM1 QQPlot
+qqDf4 <- data.frame(ps=sort(-log10(GFM1_pval_mx)), normalQuantiles=expected_pval)
+p4 = ggplot(qqDf4) + geom_point(aes(normalQuantiles, ps)) + ggtitle("GFM1 p-values vs Expected p-values")
+p4 = p4 + geom_abline(intercept = 0, slope = 1, color="red")
+p4
+ggsave("GFM1QQ.png")
+
+#MARCH7
+MARCH7_pval_mx <- rep(0,ncol(xa_mat))
+for(i in 1:ncol(xa_mat)){
+  MARCH7_pval_mx[i] <- pval_calculator_covar(phenotype[,5], xa_mat[,i], xd_mat[,i], cbind(xz_sex[,1],xz_pop[,1]))
+}
+
+#MARCH7 Manhattan Plot with Bonferroni Corrected Cutoff
+df5 <- data.frame(index = 1:length(MARCH7_pval_mx), pval = MARCH7_pval_mx) 
+manhattan5 <- ggplot(df5, aes(index, -log10(MARCH7_pval_mx))) + geom_point()
+manhattan5 = manhattan5 + geom_hline(yintercept = -log10(.05/50000), color = "red")
+manhattan5 = manhattan5 + ggtitle("Bonferroni Corrected Manhattan Plot for MARCH7")
+manhattan5 = manhattan5 + xlab("Index") + ylab("-log10(p-value)")
+manhattan5
+ggsave("MARCH7Manhattan.png")
+
+#MARCH7 QQPlot
+qqDf5 <- data.frame(ps=sort(-log10(MARCH7_pval_mx)), normalQuantiles=expected_pval)
+p5 = ggplot(qqDf5) + geom_point(aes(normalQuantiles, ps)) + ggtitle("MARCH7 p-values vs Expected p-values")
+p5 = p5 + geom_abline(intercept = 0, slope = 1, color="red")
+p5
+ggsave("MARCH7QQ.png")
+```
